@@ -64,7 +64,6 @@ export async function scrapeFlyKsaWithDevToolsAgent(
     page = await context.newPage();
 
     await page.goto('https://flyksa.com/en', { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(1000);
 
     const cookies = await context.cookies('https://flyksa.com/en');
     const xsrf = cookies.find((c) => c.name === 'XSRF-TOKEN')?.value ?? '';
@@ -98,7 +97,8 @@ export async function scrapeFlyKsaWithDevToolsAgent(
     const resultsUrl = searchJson.__ajax?.redirect ?? 'https://flyksa.com/en/search/results';
 
     await page.goto(resultsUrl, { waitUntil: 'networkidle', timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(7000);
+    // resolves as soon as cards render instead of always paying a fixed 7s tax
+    await page.waitForSelector('#outbound-main .flight_info_content', { timeout: 7000 }).catch(() => {});
 
     const outboundFlights = await extractFlyKsaFlights(page, 'outbound-main', date);
     console.log(`[scraper:flyksa] outbound-raw`, JSON.stringify(outboundFlights));
@@ -118,6 +118,7 @@ export async function scrapeFlyKsaWithDevToolsAgent(
     };
 
     if (options?.returnDate) {
+      await page.waitForSelector('#inbound-main .flight_info_content', { timeout: 3000 }).catch(() => {});
       const inboundFlights = await extractFlyKsaFlights(page, 'inbound-main', options.returnDate);
       console.log(`[scraper:flyksa] inbound-raw`, JSON.stringify(inboundFlights));
 
