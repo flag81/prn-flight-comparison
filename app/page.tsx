@@ -127,13 +127,13 @@ export default function Home() {
               <p className="text-xs text-red-500 bg-red-50 p-2 rounded border border-red-100 mb-4">
                 Error gathering data: {res.message}
               </p>
-            ) : !res.outbound.isAvailable ? (
+            ) : !res.outbound.isAvailable && !(searchParams.roundTrip && res.inbound?.isAvailable) ? (
               <p className="text-sm text-gray-400 italic">No flight data recovered.</p>
             ) : (
               <div className="space-y-4">
                 <div>
                   <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Outbound Flights</h4>
-                  {res.outbound.flights.length === 0 ? (
+                  {!res.outbound.isAvailable ? (
                     <p className="text-xs text-gray-400 italic">No outbound flights found.</p>
                   ) : (
                     res.outbound.flights.map((flight, i) => (
@@ -157,7 +157,7 @@ export default function Home() {
                 {searchParams.roundTrip && res.inbound && (
                   <div>
                     <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2 border-t pt-2">Return Flights</h4>
-                    {res.inbound.flights.length === 0 ? (
+                    {!res.inbound.isAvailable ? (
                       <p className="text-xs text-gray-400 italic">No return flights found.</p>
                     ) : (
                       res.inbound.flights.map((flight, i) => {

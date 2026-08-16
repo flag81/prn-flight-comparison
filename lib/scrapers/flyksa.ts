@@ -14,7 +14,10 @@ interface FlyKsaFlightCard {
 // so we read them straight from the DOM instead of screenshotting + OCR-ing the page.
 async function extractFlyKsaFlights(page: Page, containerId: string, date: string): Promise<FlyKsaFlightCard[]> {
   return page.$$eval(`#${containerId} .swiper-slide[data-date="${date}"] label.flight_info_content`, (labels) =>
-    labels.map((label) => {
+    labels
+      // sold-out flights still render a reference price via a sibling ".sold-out" marker but aren't bookable
+      .filter((label) => !label.parentElement?.querySelector(':scope > .sold-out'))
+      .map((label) => {
       const times = Array.from(label.querySelectorAll('.time_content h5')).map((el) => el.textContent?.trim() ?? '');
       const duration = label.querySelector('.direction-names.justify-content-center .small-font')?.textContent?.trim() ?? '';
       const routeRow = label.querySelector('.direction-names.justify-content-between');

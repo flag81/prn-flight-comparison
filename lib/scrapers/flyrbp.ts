@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { chromium, type Browser, type BrowserContext, type APIRequestContext } from 'playwright';
 import type { FlightSearchResponse, FlightSegment } from '../types/flight';
 
 const DEBUG_ENABLED = process.env.DEBUG_SCRAPER !== '0';
@@ -33,6 +33,7 @@ const API_URL = 'https://sys.flyrbp.com/api2.php?scope=Booking&action=getFlights
 const FORM_HIDDEN_SERIALIZED =
   'a:2:{i:0;a:10:{s:3:"VON";a:1:{s:5:"check";a:1:{i:0;s:7:"pflicht";}}s:4:"NACH";a:1:{s:5:"check";a:1:{i:0;s:7:"pflicht";}}s:7:"RUK_VON";a:1:{s:5:"check";a:0:{}}s:8:"RUK_NACH";a:1:{s:5:"check";a:0:{}}s:6:"FLGART";a:1:{s:5:"check";a:1:{i:0;s:7:"pflicht";}}s:9:"DATUM_HIN";a:1:{s:5:"check";a:2:{i:0;s:7:"pflicht";i:1;s:16:"datumOhneUhrzeit";}}s:9:"DATUM_RUK";a:1:{s:5:"check";a:0:{}}s:6:"ANZERW";a:1:{s:5:"check";a:1:{i:0;s:7:"pflicht";}}s:6:"ANZCHD";a:1:{s:5:"check";a:1:{i:0;s:7:"pflicht";}}s:6:"ANZINF";a:1:{s:5:"check";a:1:{i:0;s:7:"pflicht";}}}i:1;a:0:{}}';
 const FORM_HIDDEN = Buffer.from(FORM_HIDDEN_SERIALIZED, 'utf8').toString('base64');
+const DEFAULT_HOMEPAGE_URL = 'https://flyrbp.com/en/flights/booking';
 
 interface FlyRbpFlight {
   flugnr?: string;
@@ -57,24 +58,19 @@ function toApiDate(isoDate: string): string {
   return `${d}.${m}.${y}`;
 }
 
-function buildMultipartBody(boundary: string, fields: Record<string, string>): string {
-  const parts: string[] = [];
-  for (const [name, value] of Object.entries(fields)) {
-    parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`);
-  }
-  parts.push(`--${boundary}--\r\n`);
-  return parts.join('');
-}
-
+// The server only attaches the `preise` pricing object to each flight when the request carries a
+// valid session/cookies (established by loading the booking page first); a cookie-less plain fetch
+// gets a 200 with the same flight list but with pricing stripped out. Using the browser context's
+// request API (after a page visit) automatically attaches those cookies.
 async function fetchFlyRbpFlightData(
   from: string,
   to: string,
   flgart: 'ow' | 'rt',
   hinDate: string,
   rukDate: string,
+  requestContext: APIRequestContext,
   api: { url: string; origin: string; referer: string } = { url: API_URL, origin: 'https://flyrbp.com', referer: 'https://flyrbp.com/' }
 ): Promise<FlyRbpFlightData> {
-  const boundary = `----WebKitFormBoundary${randomBytes(8).toString('hex')}`;
   const fields: Record<string, string> = {
     class: 'Buchungen_Buchen_Fluglisten',
     DATUM_HIN: hinDate,
@@ -92,32 +88,22 @@ async function fetchFlyRbpFlightData(
     FLGART: flgart,
   };
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
-  try {
-    const resp = await fetch(api.url, {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json, text/plain, */*',
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        Origin: api.origin,
-        Referer: api.referer,
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      },
-      body: buildMultipartBody(boundary, fields),
-      signal: controller.signal,
-    });
+  const resp = await requestContext.post(api.url, {
+    headers: {
+      Accept: 'application/json, text/plain, */*',
+      Origin: api.origin,
+      Referer: api.referer,
+    },
+    multipart: fields,
+    timeout: 20000,
+  });
 
-    if (!resp.ok) {
-      throw new Error(`Flight API responded with status ${resp.status}`);
-    }
-
-    const json = (await resp.json()) as { data?: FlyRbpFlightData };
-    return json.data ?? {};
-  } finally {
-    clearTimeout(timeout);
+  if (!resp.ok()) {
+    throw new Error(`Flight API responded with status ${resp.status()}`);
   }
+
+  const json = (await resp.json()) as { data?: FlyRbpFlightData };
+  return json.data ?? {};
 }
 
 function flightToSegment(f: FlyRbpFlight): FlightSegment {
@@ -149,10 +135,21 @@ export async function scrapeWithDevToolsAgent(
 ): Promise<FlightSearchResponse> {
   const providerName = options?.providerName ?? 'FlyRBP';
   const returnDate = options?.returnDate;
+  const homepageUrl = options?.homepageUrl ?? DEFAULT_HOMEPAGE_URL;
   const scope = `flyrbp_api_${Date.now()}`;
+
+  let browser: Browser | null = null;
+  let context: BrowserContext | null = null;
 
   try {
     debugLog(scope, 'fetch-start', { from, to, date, returnDate });
+
+    browser = await chromium.launch({ headless: true });
+    context = await browser.newContext();
+    const bootstrapPage = await context.newPage();
+    await bootstrapPage.goto(homepageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await bootstrapPage.close();
+    debugLog(scope, 'session-bootstrapped', { homepageUrl });
 
     const flgart = returnDate ? 'rt' : 'ow';
     const hinDate = toApiDate(date);
@@ -160,7 +157,7 @@ export async function scrapeWithDevToolsAgent(
     const api = options?.apiUrl
       ? { url: options.apiUrl, origin: options.apiOrigin ?? options.apiUrl, referer: options.apiReferer ?? options.apiUrl }
       : undefined;
-    const data = await fetchFlyRbpFlightData(from, to, flgart, hinDate, rukDate, api);
+    const data = await fetchFlyRbpFlightData(from, to, flgart, hinDate, rukDate, context.request, api);
 
     debugLog(scope, 'api-response', { error: data.error, hinCount: data.hin?.length ?? 0, rukCount: data.ruk?.length ?? 0 });
 
@@ -212,6 +209,9 @@ export async function scrapeWithDevToolsAgent(
         flights: [],
       },
     };
+  } finally {
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
@@ -226,6 +226,7 @@ export async function scrapePrishtinaTicketWithDevToolsAgent(
   return scrapeWithDevToolsAgent(from, to, date, {
     providerName: 'PrishtinaTicket',
     returnDate: options?.returnDate,
+    homepageUrl: 'https://www.prishtinaticket.net/en/flights/booking',
     apiUrl: 'https://sys.prishtinaticket.net/api2.php?scope=Booking&action=getFlights',
     apiOrigin: 'https://www.prishtinaticket.net',
     apiReferer: 'https://www.prishtinaticket.net/',
