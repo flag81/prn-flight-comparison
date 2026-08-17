@@ -35,6 +35,20 @@ const FORM_HIDDEN_SERIALIZED =
 const FORM_HIDDEN = Buffer.from(FORM_HIDDEN_SERIALIZED, 'utf8').toString('base64');
 const DEFAULT_HOMEPAGE_URL = 'https://flyrbp.com/en/flights/booking';
 
+// The backend blocks datacenter/VPS source IPs at the application layer (returns a plain
+// `{"error":"forbidden"}`, not a CDN/WAF challenge), so production needs to egress through a
+// non-datacenter proxy. Configure via SCRAPER_PROXY_SERVER (e.g. "http://host:port") and, if the
+// proxy requires auth, SCRAPER_PROXY_USERNAME / SCRAPER_PROXY_PASSWORD.
+function getProxyConfig(): { server: string; username?: string; password?: string } | undefined {
+  const server = process.env.SCRAPER_PROXY_SERVER;
+  if (!server) return undefined;
+  return {
+    server,
+    username: process.env.SCRAPER_PROXY_USERNAME,
+    password: process.env.SCRAPER_PROXY_PASSWORD,
+  };
+}
+
 interface FlyRbpFlight {
   flugnr?: string;
   carrier_flugnr?: string;
@@ -175,7 +189,9 @@ export async function scrapeWithDevToolsAgent(
   try {
     debugLog(scope, 'fetch-start', { from, to, date, returnDate });
 
-    browser = await chromium.launch({ headless: true });
+    const proxy = getProxyConfig();
+    debugLog(scope, 'proxy-config', { enabled: Boolean(proxy), server: proxy?.server });
+    browser = await chromium.launch({ headless: true, proxy });
     context = await browser.newContext();
     const page = await context.newPage();
     const homepageResponse = await page.goto(homepageUrl, { waitUntil: 'networkidle', timeout: 30000 });
