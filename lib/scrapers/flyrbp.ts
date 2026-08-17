@@ -70,6 +70,7 @@ async function fetchFlyRbpFlightData(
   hinDate: string,
   rukDate: string,
   page: Page,
+  scope: string,
   api: { url: string; origin: string; referer: string } = { url: API_URL, origin: 'https://flyrbp.com', referer: 'https://flyrbp.com/' }
 ): Promise<FlyRbpFlightData> {
   const fields: Record<string, string> = {
@@ -105,15 +106,30 @@ async function fetchFlyRbpFlightData(
           credentials: 'include',
         });
         const text = await resp.text();
-        return { status: resp.status, ok: resp.ok, text };
+        const headers = Object.fromEntries(resp.headers.entries());
+        return { status: resp.status, ok: resp.ok, text, headers, currentUrl: window.location.href };
       } catch (err) {
-        return { status: 0, ok: false, text: '', error: err instanceof Error ? err.message : String(err) };
+        return {
+          status: 0,
+          ok: false,
+          text: '',
+          headers: {} as Record<string, string>,
+          currentUrl: window.location.href,
+          error: err instanceof Error ? err.message : String(err),
+        };
       }
     },
     { apiUrl: api.url, formFields: fields }
   );
 
   if (!result.ok) {
+    debugLog(scope, 'flight-api-blocked', {
+      status: result.status,
+      headers: result.headers,
+      currentUrl: result.currentUrl,
+      bodySnippet: result.text.slice(0, 1000),
+      error: result.error,
+    });
     throw new Error(`Flight API responded with status ${result.status}${result.error ? ` (${result.error})` : ''}`);
   }
 
@@ -162,8 +178,15 @@ export async function scrapeWithDevToolsAgent(
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext();
     const page = await context.newPage();
-    await page.goto(homepageUrl, { waitUntil: 'networkidle', timeout: 30000 });
-    debugLog(scope, 'session-bootstrapped', { homepageUrl });
+    const homepageResponse = await page.goto(homepageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    const pageTitle = await page.title();
+    const cookies = await context.cookies();
+    debugLog(scope, 'session-bootstrapped', {
+      homepageUrl,
+      homepageStatus: homepageResponse?.status(),
+      pageTitle,
+      cookieNames: cookies.map((c) => c.name),
+    });
 
     const flgart = returnDate ? 'rt' : 'ow';
     const hinDate = toApiDate(date);
@@ -171,7 +194,7 @@ export async function scrapeWithDevToolsAgent(
     const api = options?.apiUrl
       ? { url: options.apiUrl, origin: options.apiOrigin ?? options.apiUrl, referer: options.apiReferer ?? options.apiUrl }
       : undefined;
-    const data = await fetchFlyRbpFlightData(from, to, flgart, hinDate, rukDate, page, api);
+    const data = await fetchFlyRbpFlightData(from, to, flgart, hinDate, rukDate, page, scope, api);
 
     debugLog(scope, 'api-response', { error: data.error, hinCount: data.hin?.length ?? 0, rukCount: data.ruk?.length ?? 0 });
 
