@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type APIRequestContext } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import type { FlightSearchResponse, FlightSegment } from '../types/flight';
 
 const DEBUG_ENABLED = process.env.DEBUG_SCRAPER !== '0';
@@ -59,16 +59,17 @@ function toApiDate(isoDate: string): string {
 }
 
 // The server only attaches the `preise` pricing object to each flight when the request carries a
-// valid session/cookies (established by loading the booking page first); a cookie-less plain fetch
-// gets a 200 with the same flight list but with pricing stripped out. Using the browser context's
-// request API (after a page visit) automatically attaches those cookies.
+// valid session/cookies (established by loading the booking page first). ALSO: the target's bot
+// detection distinguishes Playwright's Node-based APIRequestContext from a real browser fetch and
+// blocks it with 403 on datacenter/VPS IPs (even though the preceding page.goto succeeds), so the
+// request must run inside the page itself via page.evaluate to share the browser's own fingerprint.
 async function fetchFlyRbpFlightData(
   from: string,
   to: string,
   flgart: 'ow' | 'rt',
   hinDate: string,
   rukDate: string,
-  requestContext: APIRequestContext,
+  page: Page,
   api: { url: string; origin: string; referer: string } = { url: API_URL, origin: 'https://flyrbp.com', referer: 'https://flyrbp.com/' }
 ): Promise<FlyRbpFlightData> {
   const fields: Record<string, string> = {
@@ -88,21 +89,35 @@ async function fetchFlyRbpFlightData(
     FLGART: flgart,
   };
 
-  const resp = await requestContext.post(api.url, {
-    headers: {
-      Accept: 'application/json, text/plain, */*',
-      Origin: api.origin,
-      Referer: api.referer,
+  const result = await page.evaluate(
+    async ({ apiUrl, formFields }) => {
+      // Referer/Origin are forbidden headers in browser fetch(); the browser sets them
+      // itself based on the current page, matching what a real user's request looks like.
+      const formData = new FormData();
+      for (const [key, value] of Object.entries(formFields)) {
+        formData.append(key, value);
+      }
+      try {
+        const resp = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { Accept: 'application/json, text/plain, */*' },
+          body: formData,
+          credentials: 'include',
+        });
+        const text = await resp.text();
+        return { status: resp.status, ok: resp.ok, text };
+      } catch (err) {
+        return { status: 0, ok: false, text: '', error: err instanceof Error ? err.message : String(err) };
+      }
     },
-    multipart: fields,
-    timeout: 20000,
-  });
+    { apiUrl: api.url, formFields: fields }
+  );
 
-  if (!resp.ok()) {
-    throw new Error(`Flight API responded with status ${resp.status()}`);
+  if (!result.ok) {
+    throw new Error(`Flight API responded with status ${result.status}${result.error ? ` (${result.error})` : ''}`);
   }
 
-  const json = (await resp.json()) as { data?: FlyRbpFlightData };
+  const json = JSON.parse(result.text) as { data?: FlyRbpFlightData };
   return json.data ?? {};
 }
 
@@ -146,9 +161,8 @@ export async function scrapeWithDevToolsAgent(
 
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext();
-    const bootstrapPage = await context.newPage();
-    await bootstrapPage.goto(homepageUrl, { waitUntil: 'networkidle', timeout: 30000 });
-    await bootstrapPage.close();
+    const page = await context.newPage();
+    await page.goto(homepageUrl, { waitUntil: 'networkidle', timeout: 30000 });
     debugLog(scope, 'session-bootstrapped', { homepageUrl });
 
     const flgart = returnDate ? 'rt' : 'ow';
@@ -157,7 +171,7 @@ export async function scrapeWithDevToolsAgent(
     const api = options?.apiUrl
       ? { url: options.apiUrl, origin: options.apiOrigin ?? options.apiUrl, referer: options.apiReferer ?? options.apiUrl }
       : undefined;
-    const data = await fetchFlyRbpFlightData(from, to, flgart, hinDate, rukDate, context.request, api);
+    const data = await fetchFlyRbpFlightData(from, to, flgart, hinDate, rukDate, page, api);
 
     debugLog(scope, 'api-response', { error: data.error, hinCount: data.hin?.length ?? 0, rukCount: data.ruk?.length ?? 0 });
 
