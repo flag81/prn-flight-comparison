@@ -194,6 +194,15 @@ export async function scrapeWithDevToolsAgent(
     browser = await chromium.launch({ headless: true, proxy });
     context = await browser.newContext();
     const page = await context.newPage();
+    // We only need the document + session cookie, not rendered visuals; blocking these cuts
+    // proxy bandwidth (billed per GB) substantially since images/fonts/media dominate page weight.
+    await page.route('**/*', (route) => {
+      const type = route.request().resourceType();
+      if (type === 'image' || type === 'font' || type === 'media' || type === 'stylesheet') {
+        return route.abort();
+      }
+      return route.continue();
+    });
     // 'networkidle' rarely settles behind a slower residential proxy (analytics/chat widgets keep
     // polling); 'domcontentloaded' is enough since we only need the session cookies + title.
     const homepageResponse = await page.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
