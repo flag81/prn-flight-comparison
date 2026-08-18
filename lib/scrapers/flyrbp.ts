@@ -194,7 +194,9 @@ export async function scrapeWithDevToolsAgent(
     browser = await chromium.launch({ headless: true, proxy });
     context = await browser.newContext();
     const page = await context.newPage();
-    const homepageResponse = await page.goto(homepageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    // 'networkidle' rarely settles behind a slower residential proxy (analytics/chat widgets keep
+    // polling); 'domcontentloaded' is enough since we only need the session cookies + title.
+    const homepageResponse = await page.goto(homepageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     const pageTitle = await page.title();
     const cookies = await context.cookies();
     debugLog(scope, 'session-bootstrapped', {
